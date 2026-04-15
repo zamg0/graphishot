@@ -43,11 +43,20 @@
                 <div class="text-lg font-bold text-gray-300 mt-1" id="kill-display">KILLS: 0</div>
                 <div class="text-sm font-bold text-green-400 mt-2" id="online-indicator">ONLINE: 1</div>
             </div>
+            
             <div class="hud-panel text-white border-l-0 border-r-4 border-yellow-400 text-right">
                 <div class="text-xs text-gray-400 font-bold tracking-widest">MATCH STATUS</div>
                 <div class="text-3xl font-bold text-yellow-400" id="time-display">TIME: 3:00</div>
                 <div class="text-xl font-bold text-blue-300 mt-1" id="ammo-display">AMMO: 12/12</div>
             </div>
+        </div>
+
+        <!-- Leaderboard -->
+        <div id="leaderboard" class="absolute top-40 left-6 bg-gray-900/80 border border-gray-700 rounded p-4 text-white pointer-events-none w-72 shadow-lg">
+            <h3 class="text-sm font-bold text-yellow-400 mb-2 border-b border-gray-700 pb-1 tracking-widest">LEADERBOARD</h3>
+            <ul id="leaderboard-list" class="text-sm space-y-2 font-mono">
+                <!-- Populated via JS -->
+            </ul>
         </div>
         
         <div class="flex flex-col items-center mb-10 gap-4 mt-auto">
@@ -100,7 +109,7 @@
     <!-- End Screen -->
     <div id="end-screen" class="menu-screen hidden">
         <h1 id="end-title" class="text-6xl font-black mb-4 tracking-tighter">MATCH FINISHED</h1>
-        <p id="end-stats" class="text-2xl text-gray-300 mb-8"></p>
+        <p id="end-stats" class="text-xl text-gray-300 mb-8 text-center"></p>
         <button id="restart-btn" class="px-8 py-4 bg-white text-black hover:bg-gray-200 font-bold rounded transition-colors text-xl uppercase tracking-widest outline-none">Return to Base</button>
     </div>
 
@@ -135,7 +144,7 @@
             // Audio
             audio: {
                 music: "https://raw.githubusercontent.com/zamg0/graphishot/4214dc98752dba53dfcd852ee6d702e4929b4428/alexgrohl-energetic-action-sport-500409.mp3",
-                shot: "https://raw.githubusercontent.com/zamg0/graphishot/bc7049c86cc70dde5fec63cb8cca97baa7965285/mrfriends-pistol-shot-233473.mp3", // Fixed: Reverted back to the actual gunshot
+                shot: "https://raw.githubusercontent.com/zamg0/graphishot/bc7049c86cc70dde5fec63cb8cca97baa7965285/mrfriends-pistol-shot-233473.mp3",
                 shotMG: "https://raw.githubusercontent.com/zamg0/graphishot/615a2f82df77bb2c75db1f36959f064667f08d24/freesound_community-gun-shot-1-7069.mp3",
                 reload: "https://raw.githubusercontent.com/zamg0/graphishot/5a3d4b044987fe9cde5e08a42e2d9a403f1a81b8/dragon-studio-gun-reload-2-504027.mp3"
             }
@@ -162,17 +171,20 @@
         let reloadBuffer = null;
         
         // Multiplayer / Firebase
-        let app, auth, db, currentUser, sessionsRef, playersRef, hitsRef;
+        let app, auth, db, currentUser, sessionsRef, playersRef, hitsRef, killLogsRef;
         let lastNetworkSync = 0;
         let lastHeartbeat = 0;
         let currentSessionId = null;
         let isHost = false;
         let isCanvasEnv = false;
         let currentAppId = 'default-app-id';
+        let hostTimeout = null;
 
         let lastSyncedPos = new THREE.Vector3();
         let lastSyncedRot = 0;
         let lastSyncedHp = 100;
+        let lastSyncedKills = 0;
+        let lastSyncedDeaths = 0;
         const otherPlayers = {};
 
         // Weapon Configs
@@ -188,6 +200,7 @@
             hp: 100,
             regenTimer: 0,
             kills: 0,
+            deaths: 0,
             ammo: 12,
             maxAmmo: 12,
             isReloading: false,
@@ -234,6 +247,23 @@
                 return collection(db, 'artifacts', currentAppId, 'public', 'data', name);
             }
             return collection(db, name);
+        }
+
+        // Returns a safe spawn location on the ground
+        function getRandomSpawnPos() {
+            let x, z;
+            let valid = false;
+            while(!valid) {
+                x = (Math.random() - 0.5) * (MAP_SIZE - 20);
+                z = (Math.random() - 0.5) * (MAP_SIZE - 20);
+                
+                if (Math.abs(x) < 20 && Math.abs(z) < 20) continue; // Avoid immediate center point occasionally
+                
+                if (!checkCollisions(new THREE.Vector3(x, PLAYER_HEIGHT/2, z), 1.5, PLAYER_HEIGHT, 1.5)) {
+                    valid = true;
+                }
+            }
+            return new THREE.Vector3(x, PLAYER_HEIGHT, z);
         }
 
         async function initMultiplayer() {
@@ -348,15 +378,28 @@
             isHost = false;
             currentSessionId = sid;
             
-            // Listen for host disconnect
+            // Listen for host disconnect without relying on clock sync
             onSnapshot(doc(sessionsRef, currentSessionId), (docSnap) => {
-                if (!docSnap.exists() || (Date.now() - docSnap.data().timestamp > 15000)) {
+                if (!docSnap.exists()) {
                     if (STATE.isPlaying) {
                         controls.unlock();
-                        alert("The Host has disconnected. The server is closed.");
+                        alert("The Host has closed the server.");
                         location.reload();
                     }
+                    return;
                 }
+                
+                // Clear the previous timeout
+                if(hostTimeout) clearTimeout(hostTimeout);
+                
+                // Set a new timeout. If the host doesn't update this doc for 15 seconds, we drop.
+                hostTimeout = setTimeout(() => {
+                    if (STATE.isPlaying) {
+                        controls.unlock();
+                        alert("Connection to Host lost (timeout).");
+                        location.reload();
+                    }
+                }, 16000); 
             });
 
             startGame();
@@ -366,7 +409,11 @@
             // Update pointers to point to specific Session IDs
             playersRef = getDbCollection('players_' + currentSessionId);
             hitsRef = getDbCollection('hits_' + currentSessionId);
+            killLogsRef = getDbCollection('killLogs_' + currentSessionId);
             
+            // Spawn player randomly
+            controls.getObject().position.copy(getRandomSpawnPos());
+
             setupMultiplayerListeners();
             initAudio();
             
@@ -403,6 +450,9 @@
                             p.targetRotY = data.rotY;
                             p.lastUpdate = now;
                             p.hp = data.hp;
+                            p.nickname = data.nickname;
+                            p.kills = data.kills || 0;
+                            p.deaths = data.deaths || 0;
                         }
                     }
                     if (change.type === "removed") {
@@ -410,10 +460,12 @@
                     }
                 });
                 
-                // Update UI Counter
+                // Update UI Counter and Leaderboard
                 const onlineCount = Object.keys(otherPlayers).length + 1;
                 const onlineIndicator = document.getElementById('online-indicator');
                 if(onlineIndicator) onlineIndicator.innerText = `ONLINE: ${onlineCount}`;
+                
+                updateLeaderboard();
             }, (error) => {
                 console.error("Firestore error:", error);
             });
@@ -430,20 +482,37 @@
                         // If I was shot by another player
                         if (data.targetUid === currentUser.uid && STATE.hp > 0 && STATE.isPlaying) {
                             STATE.hp -= data.damage;
-                            updateUI();
-                            
-                            // Visual & Audio hit feedback
-                            const overlay = document.getElementById('ui-layer');
-                            overlay.style.backgroundColor = "rgba(255,0,0,0.3)";
-                            setTimeout(() => { overlay.style.backgroundColor = "transparent"; }, 150);
-                            
                             playShotSound(true); // Use the muffled shot as a generic hit impact
                             
-                            if (STATE.hp <= 0) triggerGameOver(false);
+                            if (STATE.hp <= 0) {
+                                handlePlayerDeath(data.shooterUid);
+                            } else {
+                                updateUI();
+                                // Visual hit feedback
+                                const overlay = document.getElementById('ui-layer');
+                                overlay.style.backgroundColor = "rgba(255,0,0,0.3)";
+                                setTimeout(() => { overlay.style.backgroundColor = "transparent"; }, 150);
+                            }
                         }
                     }
                 });
             });
+
+            // Listen for remote kill logs (to credit the shooter)
+            if(killLogsRef) {
+                onSnapshot(killLogsRef, (snapshot) => {
+                    snapshot.docChanges().forEach((change) => {
+                        if (change.type === "added") {
+                            const data = change.doc.data();
+                            // If it's a recent kill and I am the killer
+                            if (Date.now() - data.timestamp < 5000 && data.killer === currentUser.uid) {
+                                STATE.kills++;
+                                updateUI();
+                            }
+                        }
+                    });
+                });
+            }
         }
 
         // Generate a 3D text sprite for nicknames
@@ -519,7 +588,10 @@
                 targetPos: new THREE.Vector3(data.x, data.y - PLAYER_HEIGHT, data.z),
                 targetRotY: data.rotY,
                 lastUpdate: Date.now(),
-                hp: data.hp
+                hp: data.hp,
+                nickname: data.nickname || 'UNKNOWN',
+                kills: data.kills || 0,
+                deaths: data.deaths || 0
             };
         }
 
@@ -575,7 +647,6 @@
             createGround();
             generateProceduralCity();
             spawnBarricades();
-            spawnLights();
             spawnEnemies();
 
             // 6. Event Listeners
@@ -766,68 +837,6 @@
                 
                 scene.add(barricade);
                 collidableMeshList.push(barricade); 
-            }
-        }
-
-        function spawnLights() {
-            const lightColor = 0xffe6cc; // Warm white
-
-            if (GITHUB_ASSETS.models.streetLight) {
-                gltfLoader.load(GITHUB_ASSETS.models.streetLight, (gltf) => {
-                    const template = gltf.scene;
-                    const box = new THREE.Box3().setFromObject(template);
-                    const size = box.getSize(new THREE.Vector3());
-                    const targetHeight = 8; // Tall street light
-                    const scale = targetHeight / Math.max(size.y, 0.1);
-                    template.scale.setScalar(scale);
-
-                    for(let i=0; i<15; i++) {
-                        let pos = new THREE.Vector3();
-                        let valid = false;
-                        while (!valid) {
-                            pos.x = (Math.random() - 0.5) * (MAP_SIZE - 20);
-                            pos.y = 0;
-                            pos.z = (Math.random() - 0.5) * (MAP_SIZE - 20);
-                            
-                            // Prevent spawning inside buildings or directly on spawn
-                        if (Math.abs(pos.x) < 20 && Math.abs(pos.z) < 20) continue;
-                        if (!checkCollisions(new THREE.Vector3(pos.x, targetHeight/2, pos.z), 1, targetHeight, 1)) {
-                            valid = true;
-                        }
-                    }
-
-                    // Spawn Model
-                    const model = cloneGltf(template);
-                    
-                    // Calculate exactly how far down the model's bounding box goes from its origin
-                    const mBox = new THREE.Box3().setFromObject(model);
-                    model.position.copy(pos);
-                    model.position.y -= mBox.min.y; // Shift it up so the absolute bottom touches the ground perfectly
-                    
-                    scene.add(model);
-
-                    // Invisible Pole Hitbox
-                    const poleGeo = new THREE.BoxGeometry(0.8, targetHeight, 0.8);
-                    const poleMat = new THREE.MeshBasicMaterial({visible: false});
-                        const poleHitbox = new THREE.Mesh(poleGeo, poleMat);
-                        poleHitbox.position.set(pos.x, targetHeight/2, pos.z);
-                        scene.add(poleHitbox);
-                        collidableMeshList.push(poleHitbox);
-
-                        // Warm Point Light at the top
-                        const light = new THREE.PointLight(lightColor, 1.5, 45);
-                        light.position.set(pos.x, targetHeight - 0.5, pos.z);
-                        // Removed light.castShadow = true to prevent MAX_TEXTURE_IMAGE_UNITS error
-                        scene.add(light);
-                        
-                        // Small glowing bulb
-                        const bulbGeo = new THREE.SphereGeometry(0.3);
-                        const bulbMat = new THREE.MeshBasicMaterial({ color: lightColor });
-                        const bulb = new THREE.Mesh(bulbGeo, bulbMat);
-                        bulb.position.copy(light.position);
-                        scene.add(bulb);
-                    }
-                });
             }
         }
 
@@ -1465,14 +1474,88 @@
             return false;
         }
 
+        // Leaderboard Update Logic
+        function updateLeaderboard() {
+            const list = document.getElementById('leaderboard-list');
+            if(!list) return;
+
+            let players = [
+                { name: STATE.nickname, kills: STATE.kills, deaths: STATE.deaths }
+            ];
+
+            for(const uid in otherPlayers) {
+                const p = otherPlayers[uid];
+                players.push({
+                    name: p.nickname,
+                    kills: p.kills,
+                    deaths: p.deaths
+                });
+            }
+
+            // Calculate K/D and Sort
+            players.forEach(p => {
+                p.kd = p.deaths === 0 ? p.kills : (p.kills / p.deaths);
+            });
+
+            // Sort by KD descending, then by Kills descending
+            players.sort((a, b) => b.kd - a.kd || b.kills - a.kills);
+
+            list.innerHTML = '';
+            players.slice(0, 5).forEach((p, i) => { // Show top 5
+                const li = document.createElement('li');
+                li.className = i === 0 ? "text-yellow-400 font-bold" : "text-gray-300";
+                li.innerText = `${i+1}. ${p.name.substring(0, 10).padEnd(10, ' ')} | ${p.kills}K ${p.deaths}D | ${p.kd.toFixed(1)} KD`;
+                list.appendChild(li);
+            });
+        }
+
         function updateUI() {
-            document.getElementById('hp-display').innerText = `HP: ${STATE.hp}`;
+            document.getElementById('hp-display').innerText = `HP: ${Math.max(0, STATE.hp)}`;
             document.getElementById('kill-display').innerText = `KILLS: ${STATE.kills}`;
             document.getElementById('ammo-display').innerText = `AMMO: ${STATE.ammo}/${STATE.maxAmmo}`;
-            
+            updateLeaderboard();
+        }
+
+        function updateTimerUI() {
             let m = Math.floor(STATE.timeRemaining / 60);
             let s = Math.floor(STATE.timeRemaining % 60);
             document.getElementById('time-display').innerText = `TIME: ${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        // Handles standard Death & Respawn mechanics
+        function handlePlayerDeath(killerUid = null) {
+            STATE.deaths++;
+            STATE.hp = 100;
+            STATE.ammo = STATE.maxAmmo;
+            
+            // Move player to random spawn
+            controls.getObject().position.copy(getRandomSpawnPos());
+            
+            // Force immediate network sync
+            lastNetworkSync = 0;
+            
+            if (killerUid && killLogsRef) {
+                addDoc(killLogsRef, { killer: killerUid, victim: currentUser.uid, timestamp: Date.now() }).catch(e => console.error(e));
+            }
+            
+            updateUI();
+            
+            // Death flash effect
+            const overlay = document.getElementById('ui-layer');
+            overlay.style.backgroundColor = "rgba(255,0,0,0.8)";
+            
+            // Add text to screen
+            const deathText = document.createElement('div');
+            deathText.id = "respawn-msg";
+            deathText.style.cssText = "position:absolute; top:40%; width:100%; text-align:center; font-size:5rem; color:red; font-weight:bold; text-shadow: 2px 2px black;";
+            deathText.innerText = "YOU DIED";
+            overlay.appendChild(deathText);
+            
+            setTimeout(() => { 
+                overlay.style.backgroundColor = "transparent"; 
+                const msg = document.getElementById('respawn-msg');
+                if(msg) msg.remove();
+            }, 1000);
         }
 
         function triggerGameOver(timeUp = false) {
@@ -1485,15 +1568,15 @@
             const title = document.getElementById('end-title');
             const stats = document.getElementById('end-stats');
 
-            if(timeUp) {
-                title.innerText = "MATCH FINISHED";
-                title.className = "text-6xl font-black mb-4 tracking-tighter text-yellow-400";
-                stats.innerText = `Final Score: ${STATE.kills} Kills`;
-            } else {
-                title.innerText = "K.I.A.";
-                title.className = "text-6xl font-black mb-4 tracking-tighter text-red-500";
-                stats.innerText = `You died. Kills: ${STATE.kills}`;
-            }
+            const kd = STATE.deaths === 0 ? STATE.kills.toFixed(2) : (STATE.kills / STATE.deaths).toFixed(2);
+
+            title.innerText = "MATCH FINISHED";
+            title.className = "text-6xl font-black mb-4 tracking-tighter text-yellow-400";
+            
+            stats.innerHTML = `
+                Kills: ${STATE.kills} &nbsp;|&nbsp; Deaths: ${STATE.deaths} <br> 
+                <span class="text-3xl mt-4 block text-white">K/D Ratio: <span class="text-yellow-400">${kd}</span></span>
+            `;
         }
 
         // --- Main Game Loop ---
@@ -1507,7 +1590,8 @@
                 
                 // Deathmatch Timer Logic
                 STATE.timeRemaining -= delta;
-                updateUI();
+                updateTimerUI();
+                
                 if (STATE.timeRemaining <= 0) {
                     triggerGameOver(true);
                 }
@@ -1636,7 +1720,9 @@
                                 setTimeout(() => { overlay.style.backgroundColor = "transparent"; }, 150);
                                 
                                 b.life = 0; 
-                                if(STATE.hp <= 0) triggerGameOver(false);
+                                if(STATE.hp <= 0) {
+                                    handlePlayerDeath(null);
+                                }
                             }
                         }
                     }
@@ -1730,11 +1816,13 @@
                         updateUI();
                         enemy.lastAttack = time;
                         
-                        const overlay = document.getElementById('ui-layer');
-                        overlay.style.backgroundColor = "rgba(255,0,0,0.3)";
-                        setTimeout(() => { overlay.style.backgroundColor = "transparent"; }, 150);
-
-                        if(STATE.hp <= 0) triggerGameOver(false);
+                        if(STATE.hp <= 0) {
+                            handlePlayerDeath(null);
+                        } else {
+                            const overlay = document.getElementById('ui-layer');
+                            overlay.style.backgroundColor = "rgba(255,0,0,0.3)";
+                            setTimeout(() => { overlay.style.backgroundColor = "transparent"; }, 150);
+                        }
                     }
                 });
 
@@ -1760,13 +1848,15 @@
                         // Check thresholds to avoid redundant writes if idle
                         const hasMoved = obj.position.distanceTo(lastSyncedPos) > 0.1;
                         const hasRotated = Math.abs(euler.y - lastSyncedRot) > 0.05;
-                        const hasHpChanged = STATE.hp !== lastSyncedHp;
+                        const hasStatsChanged = STATE.hp !== lastSyncedHp || STATE.kills !== lastSyncedKills || STATE.deaths !== lastSyncedDeaths;
 
-                        if (hasMoved || hasRotated || hasHpChanged) {
+                        if (hasMoved || hasRotated || hasStatsChanged) {
                             lastNetworkSync = time;
                             lastSyncedPos.copy(obj.position);
                             lastSyncedRot = euler.y;
                             lastSyncedHp = STATE.hp;
+                            lastSyncedKills = STATE.kills;
+                            lastSyncedDeaths = STATE.deaths;
 
                             setDoc(doc(playersRef, currentUser.uid), {
                                 nickname: STATE.nickname,
@@ -1775,6 +1865,8 @@
                                 z: obj.position.z,
                                 rotY: euler.y,
                                 hp: STATE.hp,
+                                kills: STATE.kills,
+                                deaths: STATE.deaths,
                                 lastUpdate: Date.now()
                             }).catch(e => console.warn("Quota or sync limit reached. Waiting..."));
                         }

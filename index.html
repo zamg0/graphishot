@@ -78,6 +78,8 @@
         <div class="flex gap-4 mb-8" id="weapon-selector">
             <button data-weapon="pistol" class="weapon-btn border-2 border-red-500 bg-red-500/20 text-white px-6 py-2 rounded font-bold transition-all">HEAVY PISTOL</button>
             <button data-weapon="mg" class="weapon-btn border-2 border-gray-600 hover:border-gray-400 bg-gray-800/50 text-gray-400 px-6 py-2 rounded font-bold transition-all">MACHINE GUN</button>
+            <button data-weapon="sniper" class="weapon-btn border-2 border-gray-600 hover:border-gray-400 bg-gray-800/50 text-gray-400 px-6 py-2 rounded font-bold transition-all">SNIPER RIFLE</button>
+            <button data-weapon="shotgun" class="weapon-btn border-2 border-gray-600 hover:border-gray-400 bg-gray-800/50 text-gray-400 px-6 py-2 rounded font-bold transition-all">SHOTGUN</button>
         </div>
 
         <div class="flex gap-4 w-full justify-center">
@@ -87,7 +89,7 @@
 
         <div class="mt-8 text-sm text-gray-500 flex gap-6">
             <span>[W A S D] Move</span>
-            <span>[MOUSE] Look / Shoot</span>
+            <span>[MOUSE] Look / Shoot / Scope (Sniper)</span>
             <span>[SPACE] Jump</span>
             <span>[SHIFT] Sprint</span>
             <span>[R] Reload</span>
@@ -139,6 +141,8 @@
             models: {
                 playerWeapon: "https://raw.githubusercontent.com/zamg0/graphishot/2319dd5a7a57c8eb59b86dc35d5c34ef1d867b0d/Copilot3D-0b8cde19-c1d4-44b9-9b49-dfa529d14100.glb", 
                 playerWeaponMG: "https://raw.githubusercontent.com/zamg0/graphishot/2319dd5a7a57c8eb59b86dc35d5c34ef1d867b0d/Copilot3D-e3b67133-1d0f-4592-890c-8071601b6802.glb", 
+                playerWeaponSniper: "https://raw.githubusercontent.com/zamg0/graphishot/79c674f79342bd946ff3e6e0f7b6b3babfcdcdaa/Copilot3D-9e18d902-76d9-45ff-9b94-2d9d44d6fcf2.glb",
+                playerWeaponShotgun: "https://raw.githubusercontent.com/zamg0/graphishot/79c674f79342bd946ff3e6e0f7b6b3babfcdcdaa/Copilot3D-c059fe2f-db20-4f30-bc12-17850bb36d7b.glb",
                 enemy: "https://raw.githubusercontent.com/zamg0/graphishot/2319dd5a7a57c8eb59b86dc35d5c34ef1d867b0d/Copilot3D-789098be-66e8-44a7-a328-eef149caeec8.glb"
             },
             // Audio
@@ -190,7 +194,9 @@
         // Weapon Configs
         const WEAPON_CONFIG = {
             pistol: { maxAmmo: 12, damage: 15, fireRate: 0, isAuto: false },
-            mg: { maxAmmo: 30, damage: 8, fireRate: 110, isAuto: true }
+            mg: { maxAmmo: 30, damage: 8, fireRate: 110, isAuto: true },
+            sniper: { maxAmmo: 1, damage: 95, fireRate: 1000, isAuto: false },
+            shotgun: { maxAmmo: 2, damage: 45, fireRate: 500, isAuto: false }
         };
 
         // Game State
@@ -219,6 +225,8 @@
         let weaponContainer;
         let weaponMeshPistol;
         let weaponMeshMG;
+        let weaponMeshSniper;
+        let weaponMeshShotgun;
         let activeWeaponMesh; 
         
         // Shared Geometries & Materials for Particles
@@ -539,7 +547,6 @@
             const texture = new THREE.CanvasTexture(canvas);
             const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false }); // Always visible through thin walls if close
             const sprite = new THREE.Sprite(mat);
-            sprite.position.y = 2.8; 
             sprite.scale.set(3, 0.75, 1);
             return sprite;
         }
@@ -547,7 +554,7 @@
         function createOtherPlayer(uid, data) {
             const pGroup = new THREE.Group();
             
-            const bodyGeo = new THREE.BoxGeometry(1.5, 2.5, 1.5);
+            const bodyGeo = new THREE.BoxGeometry(1.5, 2.5, 1.5); 
             const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4a90e2 }); // Blue fallback for allies
             const body = new THREE.Mesh(bodyGeo, bodyMat);
             body.position.y = 1.25;
@@ -566,8 +573,14 @@
                     });
                     
                     const mBox = new THREE.Box3().setFromObject(model);
-                    model.position.sub(mBox.getCenter(new THREE.Vector3()));
-                    model.position.y += (2.5 / 2) - (mBox.getSize(new THREE.Vector3()).y / 2);
+                    const size = mBox.getSize(new THREE.Vector3());
+                    const maxDim = Math.max(size.x, size.y, size.z);
+                    
+                    model.scale.setScalar(2.5 / maxDim); 
+
+                    const scaledBox = new THREE.Box3().setFromObject(model);
+                    model.position.sub(scaledBox.getCenter(new THREE.Vector3()));
+                    model.position.y += (2.5 / 2) - (scaledBox.getSize(new THREE.Vector3()).y / 2);
 
                     const fb = pGroup.getObjectByName("fallback");
                     if(fb) pGroup.remove(fb);
@@ -578,6 +591,7 @@
             
             // Add floating nickname
             const nameLabel = makeNameLabel(data.nickname || 'UNKNOWN');
+            nameLabel.position.y = 2.8;
             pGroup.add(nameLabel);
 
             pGroup.position.set(data.x, data.y - PLAYER_HEIGHT, data.z); // Set feet on ground
@@ -672,6 +686,7 @@
             weaponContainer = new THREE.Group();
             camera.add(weaponContainer);
 
+            // Initialize Meshes
             weaponMeshPistol = new THREE.Group();
             weaponMeshPistol.position.set(0.3, -0.3, -0.5);
             weaponContainer.add(weaponMeshPistol);
@@ -681,21 +696,38 @@
             weaponMeshMG.visible = false;
             weaponContainer.add(weaponMeshMG);
 
+            weaponMeshSniper = new THREE.Group();
+            weaponMeshSniper.position.set(0.3, -0.3, -0.5);
+            weaponMeshSniper.visible = false;
+            weaponContainer.add(weaponMeshSniper);
+
+            weaponMeshShotgun = new THREE.Group();
+            weaponMeshShotgun.position.set(0.3, -0.3, -0.5);
+            weaponMeshShotgun.visible = false;
+            weaponContainer.add(weaponMeshShotgun);
+
             activeWeaponMesh = weaponMeshPistol;
 
-            const gunGeo = new THREE.BoxGeometry(0.1, 0.1, 0.4);
             const gunMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
             
-            const fallbackPistol = new THREE.Mesh(gunGeo, gunMat);
-            fallbackPistol.name = "fallback";
-            fallbackPistol.castShadow = true;
+            // Fallbacks
+            const fallbackPistol = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.4), gunMat);
+            fallbackPistol.name = "fallback"; fallbackPistol.castShadow = true;
             weaponMeshPistol.add(fallbackPistol);
 
             const fallbackMG = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.15, 0.6), gunMat);
-            fallbackMG.name = "fallback";
-            fallbackMG.castShadow = true;
+            fallbackMG.name = "fallback"; fallbackMG.castShadow = true;
             weaponMeshMG.add(fallbackMG);
 
+            const fallbackSniper = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.15, 0.8), gunMat);
+            fallbackSniper.name = "fallback"; fallbackSniper.castShadow = true;
+            weaponMeshSniper.add(fallbackSniper);
+
+            const fallbackShotgun = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.5), gunMat);
+            fallbackShotgun.name = "fallback"; fallbackShotgun.castShadow = true;
+            weaponMeshShotgun.add(fallbackShotgun);
+
+            // Loaders
             if (GITHUB_ASSETS.models.playerWeapon) {
                 gltfLoader.load(GITHUB_ASSETS.models.playerWeapon, (gltf) => {
                     const model = gltf.scene;
@@ -705,7 +737,6 @@
                     box.setFromObject(model);
                     model.position.sub(box.getCenter(new THREE.Vector3()));
                     model.rotation.y = Math.PI; 
-
                     weaponMeshPistol.remove(fallbackPistol);
                     weaponMeshPistol.add(model);
                 });
@@ -720,9 +751,36 @@
                     box.setFromObject(model);
                     model.position.sub(box.getCenter(new THREE.Vector3()));
                     model.rotation.y = Math.PI; 
-                    
                     weaponMeshMG.remove(fallbackMG);
                     weaponMeshMG.add(model);
+                });
+            }
+
+            if (GITHUB_ASSETS.models.playerWeaponSniper) {
+                gltfLoader.load(GITHUB_ASSETS.models.playerWeaponSniper, (gltf) => {
+                    const model = gltf.scene;
+                    const box = new THREE.Box3().setFromObject(model);
+                    const maxDim = Math.max(...box.getSize(new THREE.Vector3()).toArray());
+                    model.scale.setScalar(0.8 / maxDim); 
+                    box.setFromObject(model);
+                    model.position.sub(box.getCenter(new THREE.Vector3()));
+                    model.rotation.y = Math.PI; 
+                    weaponMeshSniper.remove(fallbackSniper);
+                    weaponMeshSniper.add(model);
+                });
+            }
+
+            if (GITHUB_ASSETS.models.playerWeaponShotgun) {
+                gltfLoader.load(GITHUB_ASSETS.models.playerWeaponShotgun, (gltf) => {
+                    const model = gltf.scene;
+                    const box = new THREE.Box3().setFromObject(model);
+                    const maxDim = Math.max(...box.getSize(new THREE.Vector3()).toArray());
+                    model.scale.setScalar(0.6 / maxDim); 
+                    box.setFromObject(model);
+                    model.position.sub(box.getCenter(new THREE.Vector3()));
+                    model.rotation.y = Math.PI; 
+                    weaponMeshShotgun.remove(fallbackShotgun);
+                    weaponMeshShotgun.add(model);
                 });
             }
         }
@@ -998,10 +1056,16 @@
                     STATE.maxAmmo = WEAPON_CONFIG[STATE.selectedWeapon].maxAmmo;
                     STATE.ammo = STATE.maxAmmo;
                     
-                    if(weaponMeshPistol && weaponMeshMG) {
+                    if(weaponMeshPistol && weaponMeshMG && weaponMeshSniper && weaponMeshShotgun) {
                         weaponMeshPistol.visible = (STATE.selectedWeapon === 'pistol');
                         weaponMeshMG.visible = (STATE.selectedWeapon === 'mg');
-                        activeWeaponMesh = STATE.selectedWeapon === 'pistol' ? weaponMeshPistol : weaponMeshMG;
+                        weaponMeshSniper.visible = (STATE.selectedWeapon === 'sniper');
+                        weaponMeshShotgun.visible = (STATE.selectedWeapon === 'shotgun');
+                        
+                        if (STATE.selectedWeapon === 'pistol') activeWeaponMesh = weaponMeshPistol;
+                        else if (STATE.selectedWeapon === 'mg') activeWeaponMesh = weaponMeshMG;
+                        else if (STATE.selectedWeapon === 'sniper') activeWeaponMesh = weaponMeshSniper;
+                        else if (STATE.selectedWeapon === 'shotgun') activeWeaponMesh = weaponMeshShotgun;
                     }
                     updateUI();
                 });
@@ -1492,19 +1556,14 @@
                 });
             }
 
-            // Calculate K/D and Sort
-            players.forEach(p => {
-                p.kd = p.deaths === 0 ? p.kills : (p.kills / p.deaths);
-            });
-
-            // Sort by KD descending, then by Kills descending
-            players.sort((a, b) => b.kd - a.kd || b.kills - a.kills);
+            // Sort by Kills descending, then by Deaths ascending
+            players.sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
 
             list.innerHTML = '';
             players.slice(0, 5).forEach((p, i) => { // Show top 5
                 const li = document.createElement('li');
                 li.className = i === 0 ? "text-yellow-400 font-bold" : "text-gray-300";
-                li.innerText = `${i+1}. ${p.name.substring(0, 10).padEnd(10, ' ')} | ${p.kills}K ${p.deaths}D | ${p.kd.toFixed(1)} KD`;
+                li.innerText = `${i+1}. ${p.name.substring(0, 10).padEnd(10, ' ')} | ${p.kills}K | ${p.deaths}D`;
                 list.appendChild(li);
             });
         }
@@ -1568,14 +1627,11 @@
             const title = document.getElementById('end-title');
             const stats = document.getElementById('end-stats');
 
-            const kd = STATE.deaths === 0 ? STATE.kills.toFixed(2) : (STATE.kills / STATE.deaths).toFixed(2);
-
             title.innerText = "MATCH FINISHED";
             title.className = "text-6xl font-black mb-4 tracking-tighter text-yellow-400";
             
             stats.innerHTML = `
-                Kills: ${STATE.kills} &nbsp;|&nbsp; Deaths: ${STATE.deaths} <br> 
-                <span class="text-3xl mt-4 block text-white">K/D Ratio: <span class="text-yellow-400">${kd}</span></span>
+                Kills: ${STATE.kills} &nbsp;|&nbsp; Deaths: ${STATE.deaths}
             `;
         }
 
@@ -1653,7 +1709,13 @@
                     }
                 }
 
-                const targetFov = isAiming ? 45 : 75;
+                let targetFov = 75;
+                if (isAiming) {
+                    // Provide a much tighter zoom for the sniper rifle scope
+                    if (STATE.selectedWeapon === 'sniper') targetFov = 15;
+                    else targetFov = 45;
+                }
+                
                 camera.fov += (targetFov - camera.fov) * 10 * delta;
                 camera.updateProjectionMatrix();
 
